@@ -295,6 +295,31 @@ app.get('/ping', (_req, res) => {
   res.json({ ok: true, time: new Date().toISOString() });
 });
 
+function respondOnce(res) {
+  let sent = false;
+  return {
+    json(status, body) {
+      if (sent || res.headersSent) return false;
+      res.status(status).json(body);
+      sent = true;
+      return true;
+    },
+    text(status, body) {
+      if (sent || res.headersSent) return false;
+      res.status(status).type('text/plain; charset=utf-8').send(body);
+      sent = true;
+      return true;
+    },
+    end() {
+      if (sent || res.headersSent) return false;
+      res.end();
+      sent = true;
+      return true;
+    },
+    isSent() { return sent || res.headersSent; }
+  };
+}
+
 // ===== 사용 가능 모델 리스트 확인(계정/키 진단용) =====
 app.get('/api/models', async (_req, res) => {
   try {
@@ -406,64 +431,85 @@ ${testProductInfo}
 });
 
 // ===== 실제 PDF 업로드 버전 =====
+// ===== 실제 PDF 업로드 버전 =====
 app.post('/api/generate-script', upload.single('pdf'), async (req, res) => {
-  res.setTimeout(35000, () => {
-    console.error('Response timeout: /api/generate-script');
-    try {
-      res.status(504).json({ success: false, error: 'Gateway Timeout' });
-    } catch {}
-  });
+  const respond = respondOnce(res);
+
+  const timeoutMs = TIMEOUT_MS; // .env의 CLAUDE_TIMEOUT_MS 사용
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    console.error(`[TIMEOUT] ${timeoutMs}ms elapsed → aborting Anthropic call (/api/generate-script)`);
+    controller.abort();
+  }, timeoutMs);
 
   try {
     let productInfo = '';
-
     if (req.file) {
       const pdfData = await pdfParse(req.file.buffer);
       productInfo = pdfData.text || '';
     }
 
-    const response = await callClaudeWithTimeout({
-      model: MODEL_ID,
-      max_tokens: 8000,
-      temperature: 0.7,
-      system:
-        `당신은 네이버 라이브 쇼핑 방송 대본 작성 전문가입니다.\n\n` +
-        `다음 가이드라인을 반드시 준수하여 큐시트를 작성해주세요:\n${BROADCAST_GUIDELINES}\n\n` +
-        `위 가이드라인을 엄격히 따라 실제 방송에서 사용 가능한 전문적인 큐시트를 작성해주세요.\n` +
-        `반드시 가이드라인의 모든 요소를 포함하여 작성하세요.` +
-        `상품의 혜택이나 가격 요소는 (혜택소개), (가격소개) 등으로 생략해줘`,
-      messages: [
-        {
-          role: 'user',
-          content:
-            `다음 제품 정보를 바탕으로 60분 라이브 방송 큐시트를 작성해주세요:\n\n` +
-            `[제품 정보]\n${productInfo}\n\n` +
-            `요구사항:\n` +
-            `- 방송 시간: 60분\n` +
-            `- 시간대: 오전 11시\n` +
-            `- 형식: 네이버 라이브 쇼핑\n` +
-            `- 프로그램명: 가전주부의 핫IT슈\n\n` +
-            `반드시 포함해야 할 요소:\n` +
-            `1. 30초 카운트다운으로 시작\n` +
-            `2. 쇼호스트(서경환)와 크리에이터(가전주부 서영) 2인 진행\n` +
-            `3. "○○ 고민, △△로 해결!" 형식의 코너명\n` +
-            `4. 구체적인 시연 준비물과 분량\n` +
-            `5. 중간 퀴즈 이벤트 (4지선다)\n` +
-            `6. 제품 비교 섹션\n` +
-            `7. VMD와 의상 설정\n\n` +
-            `가이드라인에 맞춰 완전한 큐시트를 작성해주세요.`,
-        },
-      ],
-    });
+    const t0 = Date.now();
+    const response = await anthropic.messages.create(
+      {
+        model: MODEL_ID,
+        max_tokens: 4096,              // ★ 8000 → 4096 (우선 안정화)
+        temperature: 0.7,
+        system:
+          `당신은 네이버 라이브 쇼핑 방송 대본 작성 전문가입니다.\n\n` +
+          `다음 가이드라인을 반드시 준수하여 큐시트를 작성해주세요:\n${BROADCAST_GUIDELINES}\n\n` +
+          `위 가이드라인을 엄격히 따라 실제 방송에서 사용 가능한 전문적인 큐시트를 작성해주세요.\n` +
+          `반드시 가이드라인의 모든 요소를 포함하여 작성하세요.\n` +
+          `상품의 혜택이나 가격 요소는 (혜택소개), (가격소개) 등으로 표시만 하고 구체 금액은 생략하세요.`,
+        messages: [
+          {
+            role: 'user',
+            content:
+              `다음 제품 정보를 바탕으로 60분 라이브 방송 큐시트를 작성해주세요:\n\n` +
+              `[제품 정보]\n${productInfo}\n\n` +
+              `요구사항:\n` +
+              `- 방송 시간: 60분\n` +
+              `- 시간대: 오전 11시\n` +
+              `- 형식: 네이버 라이브 쇼핑\n` +
+              `- 프로그램명: 가전주부의 핫IT슈\n\n` +
+              `반드시 포함해야 할 요소:\n` +
+              `1. 30초 카운트다운으로 시작\n` +
+              `2. 쇼호스트(서경환)와 크리에이터(가전주부 서영) 2인 진행\n` +
+              `3. "○○ 고민, △△로 해결!" 형식의 코너명\n` +
+              `4. 구체적인 시연 준비물과 분량\n` +
+              `5. 중간 퀴즈 이벤트 (4지선다)\n` +
+              `6. 제품 비교 섹션\n` +
+              `7. VMD와 의상 설정\n\n` +
+              `가이드라인에 맞춰 완전한 큐시트를 작성해주세요.`,
+          },
+        ],
+      },
+      { signal: controller.signal }     // ★ 타임아웃은 이걸로만 처리
+    );
+    console.log(`[LATENCY] /api/generate-script took ${Date.now() - t0}ms`);
 
-    res.json({ success: true, script: response.content?.[0]?.text || '' });
+    respond.json(200, { success: true, script: response.content?.[0]?.text || '' });
   } catch (error) {
+    // Abort(사용자 타임아웃) 여부 구분
+    const aborted =
+      (error && (error.name === 'AbortError' || /aborted/i.test(String(error.message)))) ? true : false;
+
     console.error('Error in /api/generate-script:', error);
-    res.status(500).json({
-      success: false,
-      error: '대본 생성 중 오류가 발생했습니다.',
-      details: String(error?.message || error),
-    });
+
+    if (!respond.isSent()) {
+      if (aborted) {
+        respond.json(504, { success: false, error: 'Upstream timeout (Anthropic took too long)' });
+      } else {
+        respond.json(500, {
+          success: false,
+          error: '대본 생성 중 오류가 발생했습니다.',
+          details: String(error?.message || error),
+        });
+      }
+    }
+    // 응답이 이미 나갔으면(타 모듈에서 전송), 여기서는 아무 것도 안 함
+  } finally {
+    clearTimeout(timer);
   }
 });
 

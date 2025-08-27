@@ -107,7 +107,7 @@ function App() {
               disabled={!file || loading}
               className="generate-btn"
             >
-              {loading ? '생성 중... (10-20초 소요)' : '대본 생성하기'}
+              {loading ? '생성 중... (약 2분 소요)' : '대본 생성하기'}
             </button>
             <button 
               onClick={handleReset}
